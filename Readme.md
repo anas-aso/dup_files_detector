@@ -12,7 +12,7 @@ go build -a -installsuffix cgo -ldflags="-w -s" -o dup_files_detector
 ## Usage
 Process a single directory
 ```bash
-./dup_files_detector --root.path=path/to/check
+./dup_files_detector --directoryPath=path/to/check
 ```
 
 Or, process multiple directories
