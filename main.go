@@ -100,9 +100,10 @@ func main() {
 		}
 	}
 
+	// print files with identical content
 	for k, v := range result {
 		if len(v) > 1 {
-			fmt.Printf("%v:\n", k)
+			fmt.Printf("%v:\n", k[:10])
 			for _, file := range v {
 				fmt.Printf("\t%v\n", file)
 			}
