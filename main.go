@@ -46,6 +46,9 @@ func fileToHash(filePath string) (hash string, err error) {
 // map of files paths' with identical hash value (key)
 type identicalFiles map[string][]string
 
+// map of files paths' with identical size
+type identicalSizes map[int64][]string
+
 func main() {
 	directoriesPaths := kingpin.Flag("directoryPath", "Path to the directory(ies) you want to check (repeatable).").Default("./").Strings()
 	kingpin.Version("Duplicated files detector : 0.0.1")
@@ -53,27 +56,22 @@ func main() {
 
 	fmt.Printf("Processing files in the following directory(ies): %v\n", *directoriesPaths)
 
-	result := make(identicalFiles)
-
-	// iterate over provided directories
+	// Groups files with the same size.
+	// This optimization is needed to avoid calculating checksum for
+	// files without duplicates which is expensive for large files.
+	filesWithSameSize := make(identicalSizes)
 	for _, dir := range *directoriesPaths {
 		err := filepath.Walk(dir,
 			func(path string, info os.FileInfo, err error) error {
 				if err != nil {
 					return err
 				}
-
 				// ignore directories and symlinks
 				if info.Mode().IsRegular() {
-					h, err := fileToHash(path)
-					if err != nil {
-						panic(err)
-					}
-
-					if _, ok := result[h]; ok {
-						result[h] = append(result[h], path)
+					if _, ok := filesWithSameSize[info.Size()]; ok {
+						filesWithSameSize[info.Size()] = append(filesWithSameSize[info.Size()], path)
 					} else {
-						result[h] = []string{path}
+						filesWithSameSize[info.Size()] = []string{path}
 					}
 				}
 				return nil
@@ -84,9 +82,28 @@ func main() {
 		}
 	}
 
+	// evaluate hash for the collected files
+	result := make(identicalFiles)
+	for _, group := range filesWithSameSize {
+		if len(group) > 1 {
+			for _, path := range group {
+				h, err := fileToHash(path)
+				if err != nil {
+					panic(err)
+				}
+				if _, ok := result[h]; ok {
+					result[h] = append(result[h], path)
+				} else {
+					result[h] = []string{path}
+				}
+			}
+		}
+	}
+
+	// print files with identical content
 	for k, v := range result {
 		if len(v) > 1 {
-			fmt.Printf("%v:\n", k)
+			fmt.Printf("%v:\n", k[:10])
 			for _, file := range v {
 				fmt.Printf("\t%v\n", file)
 			}
