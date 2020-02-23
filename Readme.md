@@ -4,6 +4,14 @@ A helper application to detect and list duplicated files in a directory.
 
 I originally built it to cleanup duplicated pictures on my hard drive. But it works for other files types as well.
 
+
+## Install
+Requirement: [Golang command line](https://golang.org/doc/install).
+
+```bash
+go get -u -v github.com/anas-aso/dup_files_detector
+```
+
 ## Build
 ```bash
 go build -a -installsuffix cgo -ldflags="-w -s" -o dup_files_detector
