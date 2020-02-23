@@ -15,12 +15,14 @@
 package main
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/alecthomas/kingpin.v2"
 )
@@ -52,8 +54,18 @@ type identicalSizes map[int64][]string
 func main() {
 	directoriesPaths := kingpin.Flag("directoryPath", "Path to the directory(ies) you want to check (repeatable).").Default("./").Strings()
 	ignoreEmpty := kingpin.Flag("ignoreEmpty", "Ignore empty files.").Default("false").Bool()
+	deleteDuplicates := kingpin.Flag("deleteDuplicates", "Delete found duplicates (use with caution!).").Default("false").Bool()
 	kingpin.Version("Duplicated files detector : 0.0.1")
 	kingpin.Parse()
+
+	if *deleteDuplicates {
+		fmt.Printf("WARNING: deleting duplicated files is enabled. Do you want to continue ? (y/N) ")
+		response, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		response = strings.TrimSuffix(response, "\n")
+		if response != "y" {
+			os.Exit(1)
+		}
+	}
 
 	fmt.Printf("Processing files in the following directory(ies): %v\n", *directoriesPaths)
 
@@ -72,6 +84,7 @@ func main() {
 					if *ignoreEmpty && info.Size() == 0 {
 						return nil
 					}
+
 					if _, ok := filesWithSameSize[info.Size()]; ok {
 						filesWithSameSize[info.Size()] = append(filesWithSameSize[info.Size()], path)
 					} else {
@@ -108,8 +121,18 @@ func main() {
 	for k, v := range result {
 		if len(v) > 1 {
 			fmt.Printf("%v:\n", k[:10])
-			for _, file := range v {
-				fmt.Printf("\t%v\n", file)
+			for idx, file := range v {
+				fmt.Printf("\t%v", file)
+
+				// if requested, delete duplicated files.
+				if *deleteDuplicates && idx != 0 {
+					fmt.Printf(" ... Deleting duplicate.")
+					err := os.Remove(file)
+					if err != nil {
+						panic(err)
+					}
+				}
+				fmt.Println()
 			}
 		}
 	}
