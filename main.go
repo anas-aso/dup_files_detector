@@ -51,6 +51,7 @@ type identicalSizes map[int64][]string
 
 func main() {
 	directoriesPaths := kingpin.Flag("directoryPath", "Path to the directory(ies) you want to check (repeatable).").Default("./").Strings()
+	ignoreEmpty := kingpin.Flag("ignoreEmpty", "Ignore empty files.").Default("false").Bool()
 	kingpin.Version("Duplicated files detector : 0.0.1")
 	kingpin.Parse()
 
@@ -68,6 +69,9 @@ func main() {
 				}
 				// ignore directories and symlinks
 				if info.Mode().IsRegular() {
+					if *ignoreEmpty && info.Size() == 0 {
+						return nil
+					}
 					if _, ok := filesWithSameSize[info.Size()]; ok {
 						filesWithSameSize[info.Size()] = append(filesWithSameSize[info.Size()], path)
 					} else {
