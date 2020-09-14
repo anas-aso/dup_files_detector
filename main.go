@@ -27,7 +27,7 @@ import (
 	"gopkg.in/alecthomas/kingpin.v2"
 )
 
-// for a give file path, return the sha265 hash of the file's content
+// for a given file path, return the sha265 hash of the file's content
 func fileToHash(filePath string) (hash string, err error) {
 	hasher := sha256.New()
 
@@ -43,6 +43,62 @@ func fileToHash(filePath string) (hash string, err error) {
 	}
 
 	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+// Groups files with the same size.
+// This optimization is needed to avoid calculating checksum for
+// files without duplicates which is expensive for large files.
+func getFilesWithSameSize(dirPaths []string, ignoreEmptyFiles bool) identicalSizes {
+	filesWithSameSize := make(identicalSizes)
+	for _, dir := range dirPaths {
+		err := filepath.Walk(dir,
+			func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return err
+				}
+				// ignore directories and symlinks
+				if info.Mode().IsRegular() {
+					if ignoreEmptyFiles && info.Size() == 0 {
+						return nil
+					}
+
+					if _, ok := filesWithSameSize[info.Size()]; ok {
+						filesWithSameSize[info.Size()] = append(filesWithSameSize[info.Size()], path)
+					} else {
+						filesWithSameSize[info.Size()] = []string{path}
+					}
+				}
+				return nil
+			})
+
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	return filesWithSameSize
+}
+
+// evaluate hash for the collected files
+func getIdenticalFiles(files identicalSizes) identicalFiles {
+	result := make(identicalFiles)
+	for _, group := range files {
+		if len(group) > 1 {
+			for _, path := range group {
+				h, err := fileToHash(path)
+				if err != nil {
+					panic(err)
+				}
+				if _, ok := result[h]; ok {
+					result[h] = append(result[h], path)
+				} else {
+					result[h] = []string{path}
+				}
+			}
+		}
+	}
+
+	return result
 }
 
 // map of files paths' with identical hash value (key)
@@ -69,53 +125,9 @@ func main() {
 
 	fmt.Printf("Processing files in the following directory(ies): %v\n", *directoriesPaths)
 
-	// Groups files with the same size.
-	// This optimization is needed to avoid calculating checksum for
-	// files without duplicates which is expensive for large files.
-	filesWithSameSize := make(identicalSizes)
-	for _, dir := range *directoriesPaths {
-		err := filepath.Walk(dir,
-			func(path string, info os.FileInfo, err error) error {
-				if err != nil {
-					return err
-				}
-				// ignore directories and symlinks
-				if info.Mode().IsRegular() {
-					if *ignoreEmpty && info.Size() == 0 {
-						return nil
-					}
+	filesWithSameSize := getFilesWithSameSize(*directoriesPaths, *ignoreEmpty)
 
-					if _, ok := filesWithSameSize[info.Size()]; ok {
-						filesWithSameSize[info.Size()] = append(filesWithSameSize[info.Size()], path)
-					} else {
-						filesWithSameSize[info.Size()] = []string{path}
-					}
-				}
-				return nil
-			})
-
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	// evaluate hash for the collected files
-	result := make(identicalFiles)
-	for _, group := range filesWithSameSize {
-		if len(group) > 1 {
-			for _, path := range group {
-				h, err := fileToHash(path)
-				if err != nil {
-					panic(err)
-				}
-				if _, ok := result[h]; ok {
-					result[h] = append(result[h], path)
-				} else {
-					result[h] = []string{path}
-				}
-			}
-		}
-	}
+	result := getIdenticalFiles(filesWithSameSize)
 
 	// print files with identical content
 	for k, v := range result {
