@@ -6,10 +6,10 @@ I originally built it to cleanup duplicated pictures on my hard drive. But it wo
 
 
 ## Install
-Requirement: [Golang command line](https://golang.org/doc/install).
+Requirement: [Golang command line](https://golang.org/doc/install) 1.17.x
 
 ```bash
-go get -u -v github.com/anas-aso/dup_files_detector
+go install github.com/anas-aso/dup_files_detector@latest
 ```
 
 ## Build
