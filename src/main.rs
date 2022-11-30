@@ -1,6 +1,7 @@
 use clap::{arg, command, ArgAction};
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
+    fs::remove_file,
     hash::{Hash, Hasher},
     io,
     process::exit,
@@ -33,7 +34,7 @@ fn main() {
         .collect::<Vec<_>>();
 
     let delete_dups = matches.get_flag("deleteDuplicates");
-    delete_warning(delete_dups);
+    deletion_warning(delete_dups);
 
     println!(
         "Processing files in the following directory(ies): {:?}",
@@ -44,7 +45,7 @@ fn main() {
 
     let result = get_identical_files(files_with_same_size);
 
-    print_results(result);
+    process_results(result, delete_dups);
 }
 
 fn get_files_with_same_size(dirs: Vec<&str>, ignore_empty: bool) -> HashMap<u64, Vec<String>> {
@@ -105,19 +106,28 @@ fn add_file_path(result: &mut HashMap<u64, Vec<String>>, id: u64, value: String)
     }
 }
 
-fn print_results(result: HashMap<u64, Vec<String>>) {
+fn process_results(result: HashMap<u64, Vec<String>>, delete_dups: bool) {
     result.keys().for_each(|hash| {
         let files_paths = result.get(hash).unwrap();
         let dup_files_count = files_paths.len();
         if dup_files_count > 1 {
             eprintln!("{hash} ({dup_files_count})");
-            files_paths.iter().for_each(|path| eprintln!("{path}"));
+            let mut keep = true;
+            files_paths.iter().for_each(|path| {
+                eprint!("{path}\t");
+                if delete_dups && !keep {
+                    eprint!("...\tDeleting duplicate.");
+                    remove_file(path).expect("Failed to remove duplicate file!");
+                }
+                keep = false;
+                eprintln!()
+            });
             eprintln!()
         }
     });
 }
 
-fn delete_warning(delete_dups: bool) {
+fn deletion_warning(delete_dups: bool) {
     if delete_dups {
         println!("WARNING: deleting duplicated files is enabled. Do you want to continue ? (y/N) ");
         let mut response = String::new();
