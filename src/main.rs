@@ -54,17 +54,17 @@ fn parse_args() -> CliArgs {
     let dir_paths = matches
         .get_many::<String>("directoryPath")
         .unwrap()
-        .map(|d| d.clone())
+        .cloned()
         .collect::<Vec<String>>();
 
     let delete_dups = matches.get_flag("deleteDuplicates");
     let ignore_empty = matches.get_flag("ignoreEmpty");
 
-    return CliArgs {
-        dir_paths: dir_paths,
-        ignore_empty: ignore_empty,
-        delete_dups: delete_dups,
-    };
+    CliArgs {
+        dir_paths,
+        ignore_empty,
+        delete_dups,
+    }
 }
 
 // print a warning and ask for user confirmation if the deletion flag is set
@@ -104,7 +104,7 @@ fn get_files_with_same_size(dirs: Vec<String>, ignore_empty: bool) -> HashMap<u6
         }
     }
 
-    return result;
+    result
 }
 
 // add an element to the map array value.
@@ -113,8 +113,7 @@ fn add_file_path(result: &mut HashMap<u64, Vec<String>>, id: u64, value: String)
     match result.get_mut(&id) {
         Some(files_group) => files_group.push(value),
         None => {
-            let mut files_group: Vec<String> = Vec::new();
-            files_group.push(value);
+            let files_group: Vec<String> = vec![value];
             result.insert(id, files_group);
         }
     }
@@ -139,7 +138,7 @@ fn get_identical_files(
         }
     });
 
-    return result;
+    result
 }
 
 // calculate the hash of an input object
