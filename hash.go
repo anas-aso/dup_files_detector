@@ -22,6 +22,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"sync"
 )
 
 // prefixSize is how much of each file the first hashing pass reads. Files
@@ -29,9 +30,12 @@ import (
 // so this pass rules most of them out without reading them in full.
 const prefixSize = 16 << 10
 
+// readBufferSize is the size of the buffer each worker hashes through.
+const readBufferSize = 1 << 20
+
 // hashFile returns the hex-encoded SHA-256 of the first limit bytes of the
 // file (of all of it if it is shorter) and the number of bytes read.
-func hashFile(path string, limit int64) (string, int64, error) {
+func hashFile(path string, limit int64, buf []byte) (string, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", 0, err
@@ -39,7 +43,7 @@ func hashFile(path string, limit int64) (string, int64, error) {
 	defer f.Close()
 
 	h := sha256.New()
-	n, err := io.Copy(h, io.LimitReader(f, limit))
+	n, err := io.CopyBuffer(h, io.LimitReader(f, limit), buf)
 	if err != nil {
 		return "", n, err
 	}
@@ -53,8 +57,8 @@ func hashFile(path string, limit int64) (string, int64, error) {
 // still in a group. Large files are therefore only read in full when they
 // are likely duplicates. The number of files that could not be read is
 // returned as well.
-func findDuplicates(groups []fileGroup, warnings io.Writer) ([]fileGroup, int) {
-	groups, errs := hashGroups(groups, prefixSize, warnings)
+func findDuplicates(groups []fileGroup, workers int, warnings io.Writer) ([]fileGroup, int) {
+	groups, errs := hashGroups(groups, prefixSize, workers, warnings)
 
 	// Files no larger than the prefix have already been hashed in full.
 	var done, pending []fileGroup
@@ -65,39 +69,72 @@ func findDuplicates(groups []fileGroup, warnings io.Writer) ([]fileGroup, int) {
 			pending = append(pending, g)
 		}
 	}
-	full, moreErrs := hashGroups(pending, math.MaxInt64, warnings)
+	full, moreErrs := hashGroups(pending, math.MaxInt64, workers, warnings)
 
 	result := append(done, full...)
 	sortGroups(result)
 	return result, errs + moreErrs
 }
 
-// hashGroups hashes the first limit bytes of every file of every group and
-// splits each group by hash. Groups left with a single member are dropped;
-// the order of the members of a group is preserved. A file that cannot be
-// read, or that no longer has the size recorded by the scan, is reported on
-// warnings and dropped.
-func hashGroups(groups []fileGroup, limit int64, warnings io.Writer) ([]fileGroup, int) {
+// hashGroups hashes the first limit bytes of every file of every group, using
+// the given number of concurrent workers, and splits each group by hash.
+// Groups left with a single member are dropped; the order of the members of
+// a group is preserved. A file that cannot be read, or that no longer has the
+// size recorded by the scan, is reported on warnings and dropped.
+func hashGroups(groups []fileGroup, limit int64, workers int, warnings io.Writer) ([]fileGroup, int) {
+	type job struct{ group, member int }
+	type result struct {
+		hash string
+		err  error
+	}
+
+	results := make([][]result, len(groups))
+	for i, g := range groups {
+		results[i] = make([]result, len(g.paths))
+	}
+
+	jobs := make(chan job)
+	var wg sync.WaitGroup
+	for range max(workers, 1) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, readBufferSize)
+			for j := range jobs {
+				g := groups[j.group]
+				hash, n, err := hashFile(g.paths[j.member], limit, buf)
+				if err == nil && n != min(g.size, limit) {
+					err = errors.New("size changed since it was scanned")
+				}
+				results[j.group][j.member] = result{hash: hash, err: err}
+			}
+		}()
+	}
+	for gi, g := range groups {
+		for mi := range g.paths {
+			jobs <- job{group: gi, member: mi}
+		}
+	}
+	close(jobs)
+	wg.Wait()
+
 	var out []fileGroup
 	errs := 0
-	for _, g := range groups {
+	for gi, g := range groups {
 		var subgroups []fileGroup
 		byHash := make(map[string]int) // hash -> index in subgroups
-		for _, path := range g.paths {
-			hash, n, err := hashFile(path, limit)
-			if err == nil && n != min(g.size, limit) {
-				err = errors.New("size changed since it was scanned")
-			}
-			if err != nil {
+		for mi, path := range g.paths {
+			r := results[gi][mi]
+			if r.err != nil {
 				errs++
-				fmt.Fprintf(warnings, "warning: skipping %s: %s\n", path, errText(err))
+				fmt.Fprintf(warnings, "warning: skipping %s: %s\n", path, errText(r.err))
 				continue
 			}
-			i, ok := byHash[hash]
+			i, ok := byHash[r.hash]
 			if !ok {
 				i = len(subgroups)
-				byHash[hash] = i
-				subgroups = append(subgroups, fileGroup{size: g.size, hash: hash})
+				byHash[r.hash] = i
+				subgroups = append(subgroups, fileGroup{size: g.size, hash: r.hash})
 			}
 			subgroups[i].paths = append(subgroups[i].paths, path)
 		}

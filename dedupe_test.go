@@ -54,7 +54,7 @@ func dupsIn(t *testing.T, ignoreEmpty bool, dirs ...string) ([]fileGroup, int) {
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	return findDuplicates(groups, io.Discard)
+	return findDuplicates(groups, 3, io.Discard)
 }
 
 func assertGroups(t *testing.T, got []fileGroup, want [][]string) {
@@ -254,7 +254,7 @@ func TestUnreadableDirectoryIsSkipped(t *testing.T) {
 	if !strings.Contains(warnings.String(), locked) {
 		t.Errorf("warnings = %q, want a mention of %s", warnings.String(), locked)
 	}
-	dups, _ := findDuplicates(groups, io.Discard)
+	dups, _ := findDuplicates(groups, 2, io.Discard)
 	assertGroups(t, dups, [][]string{{a, b}})
 }
 
@@ -274,7 +274,7 @@ func TestUnreadableFileIsSkipped(t *testing.T) {
 		t.Fatalf("scan: %v", err)
 	}
 	var warnings bytes.Buffer
-	dups, errs := findDuplicates(groups, &warnings)
+	dups, errs := findDuplicates(groups, 2, &warnings)
 	if errs != 1 || !strings.Contains(warnings.String(), c) {
 		t.Errorf("errors = %d, warnings = %q; want 1 error mentioning %s", errs, warnings.String(), c)
 	}
@@ -293,7 +293,7 @@ func TestFileChangedAfterScanIsSkipped(t *testing.T) {
 	}
 	writeFile(t, b, []byte("same but longer"))
 
-	dups, errs := findDuplicates(groups, io.Discard)
+	dups, errs := findDuplicates(groups, 2, io.Discard)
 	if errs != 1 {
 		t.Errorf("errors = %d, want 1", errs)
 	}
@@ -383,7 +383,7 @@ func TestRunMissingDirectory(t *testing.T) {
 }
 
 func TestRunUsageErrors(t *testing.T) {
-	for _, args := range [][]string{{"--bogus"}, {"some/dir"}} {
+	for _, args := range [][]string{{"--bogus"}, {"some/dir"}, {"--workers=0"}} {
 		var stdout, stderr bytes.Buffer
 		if code := run(args, strings.NewReader(""), &stdout, &stderr); code != 2 {
 			t.Errorf("run(%q) = %d, want 2", args, code)

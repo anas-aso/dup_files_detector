@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"strings"
 )
@@ -55,6 +56,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags.Var(&dirs, "directoryPath", "Directory to check; repeat the flag to check several (default \".\").")
 	ignoreEmpty := flags.Bool("ignoreEmpty", false, "Ignore empty files.")
 	deleteDups := flags.Bool("deleteDuplicates", false, "Delete found duplicates (use with caution!).")
+	workers := flags.Int("workers", runtime.NumCPU(), "Number of files to hash concurrently.")
 	showVersion := flags.Bool("version", false, "Print the version and exit.")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -64,6 +66,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if flags.NArg() > 0 {
 		fmt.Fprintf(stderr, "unexpected argument %q: directories are given with --directoryPath\n", flags.Arg(0))
+		return 2
+	}
+	if *workers < 1 {
+		fmt.Fprintln(stderr, "--workers must be at least 1")
 		return 2
 	}
 	if *showVersion {
@@ -88,7 +94,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return 1
 	}
-	dups, hashErrors := findDuplicates(groups, stderr)
+	dups, hashErrors := findDuplicates(groups, *workers, stderr)
 
 	for _, g := range dups {
 		fmt.Fprintf(stdout, "%s:\n", g.hash[:10])
