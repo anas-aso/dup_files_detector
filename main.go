@@ -18,97 +18,14 @@ package main
 
 import (
 	"bufio"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"runtime/debug"
 	"strings"
 )
-
-// for a given file path, return the sha265 hash of the file's content
-func fileToHash(filePath string) (hash string, err error) {
-	hasher := sha256.New()
-
-	file, err := os.Open(filePath)
-	if err != nil {
-		return
-	}
-	defer file.Close()
-
-	_, err = io.Copy(hasher, file)
-	if err != nil {
-		return
-	}
-
-	return hex.EncodeToString(hasher.Sum(nil)), nil
-}
-
-// Groups files with the same size.
-// This optimization is needed to avoid calculating checksum for
-// files without duplicates which is expensive for large files.
-func getFilesWithSameSize(dirPaths []string, ignoreEmptyFiles bool) identicalSizes {
-	filesWithSameSize := make(identicalSizes)
-	for _, dir := range dirPaths {
-		err := filepath.Walk(dir,
-			func(path string, info os.FileInfo, err error) error {
-				if err != nil {
-					return err
-				}
-				// ignore directories and symlinks
-				if info.Mode().IsRegular() {
-					if ignoreEmptyFiles && info.Size() == 0 {
-						return nil
-					}
-
-					if _, ok := filesWithSameSize[info.Size()]; ok {
-						filesWithSameSize[info.Size()] = append(filesWithSameSize[info.Size()], path)
-					} else {
-						filesWithSameSize[info.Size()] = []string{path}
-					}
-				}
-				return nil
-			})
-
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	return filesWithSameSize
-}
-
-// evaluate hash for the collected files
-func getIdenticalFiles(files identicalSizes) identicalFiles {
-	result := make(identicalFiles)
-	for _, group := range files {
-		if len(group) > 1 {
-			for _, path := range group {
-				h, err := fileToHash(path)
-				if err != nil {
-					panic(err)
-				}
-				if _, ok := result[h]; ok {
-					result[h] = append(result[h], path)
-				} else {
-					result[h] = []string{path}
-				}
-			}
-		}
-	}
-
-	return result
-}
-
-// map of files paths' with identical hash value (key)
-type identicalFiles map[string][]string
-
-// map of files paths' with identical size
-type identicalSizes map[int64][]string
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
@@ -121,7 +38,7 @@ func (l *stringList) String() string     { return strings.Join(*l, ", ") }
 func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
 
 // run is the whole program. It returns the exit code: 0 on success, 1 when
-// the user declines to continue, 2 on a usage error.
+// the user declines to continue or the scan fails, 2 on a usage error.
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("dup_files_detector", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -165,27 +82,28 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	fmt.Fprintf(stdout, "Processing files in the following directory(ies): %v\n", []string(dirs))
 
-	filesWithSameSize := getFilesWithSameSize(dirs, *ignoreEmpty)
+	groups, err := scan(dirs, *ignoreEmpty)
+	if err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return 1
+	}
+	dups, err := findDuplicates(groups)
+	if err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return 1
+	}
 
-	result := getIdenticalFiles(filesWithSameSize)
-
-	// print files with identical content
-	for k, v := range result {
-		if len(v) > 1 {
-			fmt.Fprintf(stdout, "%v:\n", k[:10])
-			for idx, file := range v {
-				fmt.Fprintf(stdout, "\t%v", file)
-
-				// if requested, delete duplicated files.
-				if *deleteDups && idx != 0 {
-					fmt.Fprint(stdout, " ... Deleting duplicate.")
-					err := os.Remove(file)
-					if err != nil {
-						panic(err)
-					}
+	for _, g := range dups {
+		fmt.Fprintf(stdout, "%s:\n", g.hash[:10])
+		for i, path := range g.paths {
+			fmt.Fprintf(stdout, "\t%s", path)
+			if *deleteDups && i > 0 {
+				fmt.Fprint(stdout, " ... Deleting duplicate.")
+				if err := os.Remove(path); err != nil {
+					panic(err)
 				}
-				fmt.Fprintln(stdout)
 			}
+			fmt.Fprintln(stdout)
 		}
 	}
 	return 0
