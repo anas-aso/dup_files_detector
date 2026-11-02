@@ -34,6 +34,14 @@ type fileGroup struct {
 	paths []string
 }
 
+// fileID identifies a file independently of the path used to reach it. See
+// identify for how it is filled in on each platform.
+type fileID struct {
+	dev  uint64
+	ino  uint64
+	path string
+}
+
 // scanStats summarises a scan.
 type scanStats struct {
 	files  int // regular files recorded
@@ -81,9 +89,10 @@ func (r root) display(path string) string {
 // which are the only candidates for being duplicates. Directories are walked
 // in the order given, each in lexical order. Symbolic links are not followed,
 // other than a root that is one itself; paths are reported under the root as
-// it was given. Entries that cannot be read are reported on warnings and
-// skipped. Groups are returned sorted by size, largest first, then by first
-// path.
+// it was given. A file reachable through several paths (hard links,
+// overlapping roots) is recorded once, under the first path seen. Entries
+// that cannot be read are reported on warnings and skipped. Groups are
+// returned sorted by size, largest first, then by first path.
 func scan(dirs []string, ignoreEmpty bool, warnings io.Writer) ([]fileGroup, scanStats, error) {
 	roots := make([]root, 0, len(dirs))
 	for _, dir := range dirs {
@@ -95,6 +104,7 @@ func scan(dirs []string, ignoreEmpty bool, warnings io.Writer) ([]fileGroup, sca
 	}
 
 	var stats scanStats
+	seen := make(map[fileID]struct{})
 	bySize := make(map[int64][]string)
 	skip := func(path string, err error) {
 		stats.errors++
@@ -121,6 +131,11 @@ func scan(dirs []string, ignoreEmpty bool, warnings io.Writer) ([]fileGroup, sca
 			if ignoreEmpty && size == 0 {
 				return nil
 			}
+			id := identify(path, info)
+			if _, ok := seen[id]; ok {
+				return nil
+			}
+			seen[id] = struct{}{}
 			stats.files++
 			bySize[size] = append(bySize[size], r.display(path))
 			return nil

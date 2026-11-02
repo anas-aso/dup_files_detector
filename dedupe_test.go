@@ -138,6 +138,33 @@ func TestGroupsAreOrderedBySizeThenPath(t *testing.T) {
 	})
 }
 
+func TestOverlappingRootsDoNotPairAFileWithItself(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	writeFile(t, filepath.Join(sub, "only"), []byte("one copy"))
+
+	for _, roots := range [][]string{{dir, dir}, {dir, sub}, {sub, dir}} {
+		dups, _ := dupsIn(t, false, roots...)
+		assertGroups(t, dups, nil)
+	}
+}
+
+func TestHardLinksCountAsOneFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("hard links are not recognised on Windows")
+	}
+	dir := t.TempDir()
+	a, c := filepath.Join(dir, "a"), filepath.Join(dir, "c")
+	writeFile(t, a, []byte("linked"))
+	if err := os.Link(a, filepath.Join(dir, "b")); err != nil {
+		t.Skipf("hard links not supported here: %v", err)
+	}
+	writeFile(t, c, []byte("linked")) // a real copy
+
+	dups, _ := dupsIn(t, false, dir)
+	assertGroups(t, dups, [][]string{{a, c}})
+}
+
 func TestSymlinks(t *testing.T) {
 	dir := t.TempDir()
 	real := filepath.Join(dir, "real")
