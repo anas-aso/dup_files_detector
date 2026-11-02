@@ -138,6 +138,49 @@ func TestGroupsAreOrderedBySizeThenPath(t *testing.T) {
 	})
 }
 
+func TestSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	writeFile(t, filepath.Join(real, "a"), []byte("content"))
+	writeFile(t, filepath.Join(real, "b"), []byte("content"))
+	if err := os.Symlink(filepath.Join(real, "a"), filepath.Join(real, "link-to-a")); err != nil {
+		t.Skipf("symlinks not supported here: %v", err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	// Symlinked files are ignored, a root that is a symlink is followed, and
+	// paths are reported under the name the root was given as.
+	dups, _ := dupsIn(t, false, link)
+	assertGroups(t, dups, [][]string{{filepath.Join(link, "a"), filepath.Join(link, "b")}})
+}
+
+func TestRelativeRootGivesRelativePaths(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a"), []byte("x"))
+	writeFile(t, filepath.Join(dir, "sub", "b"), []byte("x"))
+	t.Chdir(dir)
+
+	for _, root := range []string{".", "./", "sub/.."} {
+		dups, _ := dupsIn(t, false, root)
+		assertGroups(t, dups, [][]string{{"a", filepath.Join("sub", "b")}})
+	}
+}
+
+func TestScanRejectsBadRoots(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "file")
+	writeFile(t, file, []byte("x"))
+
+	for _, root := range []string{filepath.Join(dir, "missing"), file} {
+		if _, _, err := scan([]string{root}, false, io.Discard); err == nil {
+			t.Errorf("scan(%s) succeeded, want an error", root)
+		}
+	}
+}
+
 func TestUnreadableDirectoryIsSkipped(t *testing.T) {
 	skipIfPermissionsAreNotEnforced(t)
 	dir := t.TempDir()
@@ -260,6 +303,14 @@ func TestRunReportsProblemsInExitCode(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "warning: skipping "+locked) {
 		t.Errorf("stderr = %q, want a warning about %s", stderr.String(), locked)
+	}
+}
+
+func TestRunMissingDirectory(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--directoryPath", filepath.Join(t.TempDir(), "missing")}, strings.NewReader(""), &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "error:") {
+		t.Errorf("exit code = %d, stderr = %q; want 1 and an error message", code, stderr.String())
 	}
 }
 
