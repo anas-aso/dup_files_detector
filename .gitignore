@@ -1,0 +1,5 @@
+# Build output
+/dup_files_detector
+
+# Scan reports
+*.log

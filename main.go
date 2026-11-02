@@ -12,141 +12,222 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Command dup_files_detector lists the files with identical content found
+// under one or more directories and can delete the redundant copies.
 package main
 
 import (
 	"bufio"
-	"crypto/sha256"
-	"encoding/hex"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strings"
-
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
-// for a given file path, return the sha265 hash of the file's content
-func fileToHash(filePath string) (hash string, err error) {
-	hasher := sha256.New()
-
-	file, err := os.Open(filePath)
-	if err != nil {
-		return
-	}
-	defer file.Close()
-
-	_, err = io.Copy(hasher, file)
-	if err != nil {
-		return
-	}
-
-	return hex.EncodeToString(hasher.Sum(nil)), nil
-}
-
-// Groups files with the same size.
-// This optimization is needed to avoid calculating checksum for
-// files without duplicates which is expensive for large files.
-func getFilesWithSameSize(dirPaths []string, ignoreEmptyFiles bool) identicalSizes {
-	filesWithSameSize := make(identicalSizes)
-	for _, dir := range dirPaths {
-		err := filepath.Walk(dir,
-			func(path string, info os.FileInfo, err error) error {
-				if err != nil {
-					return err
-				}
-				// ignore directories and symlinks
-				if info.Mode().IsRegular() {
-					if ignoreEmptyFiles && info.Size() == 0 {
-						return nil
-					}
-
-					if _, ok := filesWithSameSize[info.Size()]; ok {
-						filesWithSameSize[info.Size()] = append(filesWithSameSize[info.Size()], path)
-					} else {
-						filesWithSameSize[info.Size()] = []string{path}
-					}
-				}
-				return nil
-			})
-
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	return filesWithSameSize
-}
-
-// evaluate hash for the collected files
-func getIdenticalFiles(files identicalSizes) identicalFiles {
-	result := make(identicalFiles)
-	for _, group := range files {
-		if len(group) > 1 {
-			for _, path := range group {
-				h, err := fileToHash(path)
-				if err != nil {
-					panic(err)
-				}
-				if _, ok := result[h]; ok {
-					result[h] = append(result[h], path)
-				} else {
-					result[h] = []string{path}
-				}
-			}
-		}
-	}
-
-	return result
-}
-
-// map of files paths' with identical hash value (key)
-type identicalFiles map[string][]string
-
-// map of files paths' with identical size
-type identicalSizes map[int64][]string
-
 func main() {
-	directoriesPaths := kingpin.Flag("directoryPath", "Path to the directory(ies) you want to check (repeatable).").Default("./").Strings()
-	ignoreEmpty := kingpin.Flag("ignoreEmpty", "Ignore empty files.").Default("false").Bool()
-	deleteDuplicates := kingpin.Flag("deleteDuplicates", "Delete found duplicates (use with caution!).").Default("false").Bool()
-	kingpin.Version("Duplicated files detector : 0.0.1")
-	kingpin.Parse()
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+}
 
-	if *deleteDuplicates {
-		fmt.Printf("WARNING: deleting duplicated files is enabled. Do you want to continue ? (y/N) ")
-		response, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-		response = strings.TrimSuffix(response, "\n")
-		if response != "y" {
-			os.Exit(1)
+// stringList collects the values of a repeatable flag.
+type stringList []string
+
+func (l *stringList) String() string     { return strings.Join(*l, ", ") }
+func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
+
+// run is the whole program. It returns the exit code: 0 on success, 1 when
+// something failed or had to be skipped (the results may be incomplete), and
+// 2 on a usage error. Progress and warnings go to stderr, the report to
+// stdout.
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("dup_files_detector", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	flags.Usage = func() {
+		fmt.Fprintln(stderr, "Usage: dup_files_detector [flags]")
+		fmt.Fprintln(stderr)
+		fmt.Fprintln(stderr, "Lists the files with identical content found under the given directories.")
+		fmt.Fprintln(stderr)
+		fmt.Fprintln(stderr, "Flags:")
+		flags.PrintDefaults()
+	}
+	var dirs stringList
+	flags.Var(&dirs, "directoryPath", "Directory to check; repeat the flag to check several (default \".\").")
+	ignoreEmpty := flags.Bool("ignoreEmpty", false, "Ignore empty files.")
+	deleteDups := flags.Bool("deleteDuplicates", false, "Delete the duplicates, keeping the first file of each group (asks for confirmation).")
+	workers := flags.Int("workers", runtime.NumCPU(), "Number of files to hash concurrently.")
+	showVersion := flags.Bool("version", false, "Print the version and exit.")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if flags.NArg() > 0 {
+		fmt.Fprintf(stderr, "unexpected argument %q: directories are given with --directoryPath\n", flags.Arg(0))
+		return 2
+	}
+	if *workers < 1 {
+		fmt.Fprintln(stderr, "--workers must be at least 1")
+		return 2
+	}
+	if *showVersion {
+		fmt.Fprintln(stdout, "dup_files_detector", version())
+		return 0
+	}
+	if len(dirs) == 0 {
+		dirs = stringList{"."}
+	}
+
+	if *deleteDups {
+		fmt.Fprint(stderr, "WARNING: deleting duplicated files is enabled. Do you want to continue? (y/N) ")
+		if !confirm(stdin) {
+			fmt.Fprintln(stderr, "Aborted.")
+			return 1
 		}
 	}
 
-	fmt.Printf("Processing files in the following directory(ies): %v\n", *directoriesPaths)
+	fmt.Fprintf(stderr, "Scanning %s ...\n", strings.Join(dirs, ", "))
+	groups, stats, err := scan(dirs, *ignoreEmpty, stderr)
+	if err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return 1
+	}
+	candidates, candidateBytes := 0, int64(0)
+	for _, g := range groups {
+		candidates += len(g.paths)
+		candidateBytes += g.size * int64(len(g.paths))
+	}
+	fmt.Fprintf(stderr, "Scanned %s; comparing the %s that share a size with another (%s) ...\n",
+		plural(stats.files, "file"), plural(candidates, "file"), formatBytes(candidateBytes))
 
-	filesWithSameSize := getFilesWithSameSize(*directoriesPaths, *ignoreEmpty)
+	dups, hashErrors := findDuplicates(groups, *workers, stderr)
+	rs := report(stdout, dups, *deleteDups)
+	if len(dups) == 0 {
+		fmt.Fprintln(stdout, "No duplicates found.")
+	} else {
+		fmt.Fprintf(stdout, "\nFound %s of duplicates: %s, %s reclaimable.\n",
+			plural(len(dups), "group"), plural(rs.redundant, "redundant file"), formatBytes(rs.reclaimable))
+		if *deleteDups {
+			fmt.Fprintf(stdout, "Deleted %s, freed %s.\n", plural(rs.deleted, "file"), formatBytes(rs.freed))
+		}
+	}
 
-	result := getIdenticalFiles(filesWithSameSize)
+	if problems := stats.errors + hashErrors + rs.failed; problems > 0 {
+		fmt.Fprintf(stderr, "%s reported above; the results may be incomplete.\n", plural(problems, "problem"))
+		return 1
+	}
+	return 0
+}
 
-	// print files with identical content
-	for k, v := range result {
-		if len(v) > 1 {
-			fmt.Printf("%v:\n", k[:10])
-			for idx, file := range v {
-				fmt.Printf("\t%v", file)
+// reportStats summarises what report printed and did.
+type reportStats struct {
+	redundant   int   // files beyond the first one of each group
+	reclaimable int64 // bytes taken up by the redundant files
+	deleted     int
+	freed       int64
+	failed      int // deletions that failed
+}
 
-				// if requested, delete duplicated files.
-				if *deleteDuplicates && idx != 0 {
-					fmt.Printf(" ... Deleting duplicate.")
-					err := os.Remove(file)
-					if err != nil {
-						panic(err)
+// report prints the duplicate groups to w: a line per group followed by its
+// paths, one per indented line. With del set it also deletes every file of
+// each group except the first one, noting the outcome next to the path.
+func report(w io.Writer, groups []fileGroup, del bool) reportStats {
+	var rs reportStats
+	for _, g := range groups {
+		fmt.Fprintf(w, "%s: %s, %s each\n", g.hash[:10], plural(len(g.paths), "file"), formatBytes(g.size))
+		for i, path := range g.paths {
+			fmt.Fprintf(w, "\t%s", path)
+			if i > 0 {
+				rs.redundant++
+				rs.reclaimable += g.size
+				if del {
+					if err := deleteDuplicate(g.paths[0], path, g.size); err != nil {
+						rs.failed++
+						fmt.Fprintf(w, " ... NOT deleted: %v", err)
+					} else {
+						rs.deleted++
+						rs.freed += g.size
+						fmt.Fprint(w, " ... deleted")
 					}
 				}
-				fmt.Println()
 			}
+			fmt.Fprintln(w)
 		}
 	}
+	return rs
+}
 
+// deleteDuplicate removes dup, but only after checking that both it and
+// kept, the copy that stays, still are the regular files of the given size
+// that the scan saw. A file that changed or vanished in the meantime, or
+// whose kept copy did, is left alone.
+func deleteDuplicate(kept, dup string, size int64) error {
+	if err := checkUnchanged(kept, size); err != nil {
+		return fmt.Errorf("the copy being kept (%s) %w", kept, err)
+	}
+	if err := checkUnchanged(dup, size); err != nil {
+		return fmt.Errorf("the file %w", err)
+	}
+	if err := os.Remove(dup); err != nil {
+		return errors.New(errText(err))
+	}
+	return nil
+}
+
+func checkUnchanged(path string, size int64) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("cannot be checked: %s", errText(err))
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("is no longer a regular file")
+	}
+	if info.Size() != size {
+		return errors.New("changed size since it was scanned")
+	}
+	return nil
+}
+
+// confirm reads one line from r and reports whether it is a "yes".
+func confirm(r io.Reader) bool {
+	line, _ := bufio.NewReader(r).ReadString('\n')
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true
+	}
+	return false
+}
+
+// version is the module version when the binary was built with go install,
+// and "(devel)" for local builds.
+func version() string {
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
+		return info.Main.Version
+	}
+	return "unknown"
+}
+
+// plural renders a count with its noun: "1 file", "2 files".
+func plural(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// formatBytes renders a size in binary units: "512 B", "1.5 MiB".
+func formatBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
