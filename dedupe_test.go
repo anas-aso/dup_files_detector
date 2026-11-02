@@ -35,6 +35,17 @@ func writeFile(t *testing.T, path string, content []byte) {
 	}
 }
 
+// bigContent returns more than prefixSize bytes ending in last, so that two
+// results with different last bytes share a prefix but differ as a whole.
+func bigContent(last byte) []byte {
+	b := make([]byte, prefixSize+4096)
+	for i := range b {
+		b[i] = byte(i % 251)
+	}
+	b[len(b)-1] = last
+	return b
+}
+
 // dupsIn scans dirs and returns the duplicate groups found and the number of
 // files that could not be hashed.
 func dupsIn(t *testing.T, ignoreEmpty bool, dirs ...string) ([]fileGroup, int) {
@@ -105,6 +116,17 @@ func TestFindsFilesWithIdenticalContent(t *testing.T) {
 			t.Errorf("hash = %s, want the SHA-256 of \"hello\" (%s)", dups[0].hash, want)
 		}
 	}
+}
+
+func TestLargeFilesAreComparedInFull(t *testing.T) {
+	dir := t.TempDir()
+	a, b, c := filepath.Join(dir, "a"), filepath.Join(dir, "b"), filepath.Join(dir, "c")
+	writeFile(t, a, bigContent(1))
+	writeFile(t, b, bigContent(1))
+	writeFile(t, c, bigContent(2)) // same size and prefix, different tail
+
+	dups, _ := dupsIn(t, false, dir)
+	assertGroups(t, dups, [][]string{{a, b}})
 }
 
 func TestEmptyFiles(t *testing.T) {
@@ -257,6 +279,25 @@ func TestUnreadableFileIsSkipped(t *testing.T) {
 		t.Errorf("errors = %d, warnings = %q; want 1 error mentioning %s", errs, warnings.String(), c)
 	}
 	assertGroups(t, dups, [][]string{{a, b}})
+}
+
+func TestFileChangedAfterScanIsSkipped(t *testing.T) {
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+	writeFile(t, a, []byte("same"))
+	writeFile(t, b, []byte("same"))
+
+	groups, _, err := scan([]string{dir}, false, io.Discard)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	writeFile(t, b, []byte("same but longer"))
+
+	dups, errs := findDuplicates(groups, io.Discard)
+	if errs != 1 {
+		t.Errorf("errors = %d, want 1", errs)
+	}
+	assertGroups(t, dups, nil)
 }
 
 func TestRunReportsDuplicates(t *testing.T) {
