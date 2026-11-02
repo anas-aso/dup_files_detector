@@ -1,6 +1,6 @@
 module github.com/anas-aso/dup_files_detector
 
-go 1.17
+go 1.27.3
 
 require gopkg.in/alecthomas/kingpin.v2 v2.2.6
 
