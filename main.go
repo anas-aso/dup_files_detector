@@ -39,8 +39,8 @@ func (l *stringList) String() string     { return strings.Join(*l, ", ") }
 func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
 
 // run is the whole program. It returns the exit code: 0 on success, 1 when
-// the user declines to continue, the scan fails or something had to be
-// skipped (the results may be incomplete), 2 on a usage error.
+// something failed or had to be skipped (the results may be incomplete), and
+// 2 on a usage error.
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("dup_files_detector", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -96,25 +96,59 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	dups, hashErrors := findDuplicates(groups, *workers, stderr)
 
+	deleteErrors := 0
 	for _, g := range dups {
 		fmt.Fprintf(stdout, "%s:\n", g.hash[:10])
 		for i, path := range g.paths {
 			fmt.Fprintf(stdout, "\t%s", path)
 			if *deleteDups && i > 0 {
-				fmt.Fprint(stdout, " ... Deleting duplicate.")
-				if err := os.Remove(path); err != nil {
-					panic(err)
+				if err := deleteDuplicate(g.paths[0], path, g.size); err != nil {
+					deleteErrors++
+					fmt.Fprintf(stdout, " ... NOT deleted: %v", err)
+				} else {
+					fmt.Fprint(stdout, " ... deleted")
 				}
 			}
 			fmt.Fprintln(stdout)
 		}
 	}
 
-	if problems := stats.errors + hashErrors; problems > 0 {
+	if problems := stats.errors + hashErrors + deleteErrors; problems > 0 {
 		fmt.Fprintf(stderr, "%d problem(s) reported above; the results may be incomplete.\n", problems)
 		return 1
 	}
 	return 0
+}
+
+// deleteDuplicate removes dup, but only after checking that both it and
+// kept, the copy that stays, still are the regular files of the given size
+// that the scan saw. A file that changed or vanished in the meantime, or
+// whose kept copy did, is left alone.
+func deleteDuplicate(kept, dup string, size int64) error {
+	if err := checkUnchanged(kept, size); err != nil {
+		return fmt.Errorf("the copy being kept (%s) %w", kept, err)
+	}
+	if err := checkUnchanged(dup, size); err != nil {
+		return fmt.Errorf("the file %w", err)
+	}
+	if err := os.Remove(dup); err != nil {
+		return errors.New(errText(err))
+	}
+	return nil
+}
+
+func checkUnchanged(path string, size int64) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("cannot be checked: %s", errText(err))
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("is no longer a regular file")
+	}
+	if info.Size() != size {
+		return errors.New("changed size since it was scanned")
+	}
+	return nil
 }
 
 // confirm reads one line from r and reports whether it is a "yes".

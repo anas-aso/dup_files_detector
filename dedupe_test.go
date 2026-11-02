@@ -331,6 +331,9 @@ func TestRunDeletesDuplicatesWhenConfirmed(t *testing.T) {
 	}
 	assertGone(t, b)
 	assertExists(t, a, c)
+	if want := "\t" + b + " ... deleted\n"; !strings.Contains(stdout.String(), want) {
+		t.Errorf("stdout = %q, want it to contain %q", stdout.String(), want)
+	}
 }
 
 func TestRunDeletesNothingWithoutConfirmation(t *testing.T) {
@@ -399,6 +402,29 @@ func TestRunVersion(t *testing.T) {
 	if !strings.HasPrefix(stdout.String(), "dup_files_detector ") {
 		t.Errorf("stdout = %q", stdout.String())
 	}
+}
+
+func TestDeleteDuplicateChecksBothFilesFirst(t *testing.T) {
+	dir := t.TempDir()
+	kept, dup := filepath.Join(dir, "kept"), filepath.Join(dir, "dup")
+	writeFile(t, dup, []byte("abc"))
+
+	// The copy to keep is missing.
+	if err := deleteDuplicate(kept, dup, 3); err == nil {
+		t.Error("deleted although the kept copy is missing")
+	}
+	// The duplicate no longer has the scanned size.
+	writeFile(t, kept, []byte("abc"))
+	if err := deleteDuplicate(kept, dup, 99); err == nil {
+		t.Error("deleted although the size changed")
+	}
+	assertExists(t, dup)
+
+	if err := deleteDuplicate(kept, dup, 3); err != nil {
+		t.Errorf("deleteDuplicate: %v", err)
+	}
+	assertGone(t, dup)
+	assertExists(t, kept)
 }
 
 func TestConfirm(t *testing.T) {
