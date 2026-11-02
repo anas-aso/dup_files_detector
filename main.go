@@ -40,7 +40,8 @@ func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
 
 // run is the whole program. It returns the exit code: 0 on success, 1 when
 // something failed or had to be skipped (the results may be incomplete), and
-// 2 on a usage error.
+// 2 on a usage error. Progress and warnings go to stderr, the report to
+// stdout.
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("dup_files_detector", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -55,7 +56,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	var dirs stringList
 	flags.Var(&dirs, "directoryPath", "Directory to check; repeat the flag to check several (default \".\").")
 	ignoreEmpty := flags.Bool("ignoreEmpty", false, "Ignore empty files.")
-	deleteDups := flags.Bool("deleteDuplicates", false, "Delete found duplicates (use with caution!).")
+	deleteDups := flags.Bool("deleteDuplicates", false, "Delete the duplicates, keeping the first file of each group (asks for confirmation).")
 	workers := flags.Int("workers", runtime.NumCPU(), "Number of files to hash concurrently.")
 	showVersion := flags.Bool("version", false, "Print the version and exit.")
 	if err := flags.Parse(args); err != nil {
@@ -81,43 +82,82 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	if *deleteDups {
-		fmt.Fprint(stdout, "WARNING: deleting duplicated files is enabled. Do you want to continue? (y/N) ")
+		fmt.Fprint(stderr, "WARNING: deleting duplicated files is enabled. Do you want to continue? (y/N) ")
 		if !confirm(stdin) {
+			fmt.Fprintln(stderr, "Aborted.")
 			return 1
 		}
 	}
 
-	fmt.Fprintf(stdout, "Processing files in the following directory(ies): %v\n", []string(dirs))
-
+	fmt.Fprintf(stderr, "Scanning %s ...\n", strings.Join(dirs, ", "))
 	groups, stats, err := scan(dirs, *ignoreEmpty, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return 1
 	}
-	dups, hashErrors := findDuplicates(groups, *workers, stderr)
+	candidates, candidateBytes := 0, int64(0)
+	for _, g := range groups {
+		candidates += len(g.paths)
+		candidateBytes += g.size * int64(len(g.paths))
+	}
+	fmt.Fprintf(stderr, "Scanned %s; comparing the %s that share a size with another (%s) ...\n",
+		plural(stats.files, "file"), plural(candidates, "file"), formatBytes(candidateBytes))
 
-	deleteErrors := 0
-	for _, g := range dups {
-		fmt.Fprintf(stdout, "%s:\n", g.hash[:10])
-		for i, path := range g.paths {
-			fmt.Fprintf(stdout, "\t%s", path)
-			if *deleteDups && i > 0 {
-				if err := deleteDuplicate(g.paths[0], path, g.size); err != nil {
-					deleteErrors++
-					fmt.Fprintf(stdout, " ... NOT deleted: %v", err)
-				} else {
-					fmt.Fprint(stdout, " ... deleted")
-				}
-			}
-			fmt.Fprintln(stdout)
+	dups, hashErrors := findDuplicates(groups, *workers, stderr)
+	rs := report(stdout, dups, *deleteDups)
+	if len(dups) == 0 {
+		fmt.Fprintln(stdout, "No duplicates found.")
+	} else {
+		fmt.Fprintf(stdout, "\nFound %s of duplicates: %s, %s reclaimable.\n",
+			plural(len(dups), "group"), plural(rs.redundant, "redundant file"), formatBytes(rs.reclaimable))
+		if *deleteDups {
+			fmt.Fprintf(stdout, "Deleted %s, freed %s.\n", plural(rs.deleted, "file"), formatBytes(rs.freed))
 		}
 	}
 
-	if problems := stats.errors + hashErrors + deleteErrors; problems > 0 {
-		fmt.Fprintf(stderr, "%d problem(s) reported above; the results may be incomplete.\n", problems)
+	if problems := stats.errors + hashErrors + rs.failed; problems > 0 {
+		fmt.Fprintf(stderr, "%s reported above; the results may be incomplete.\n", plural(problems, "problem"))
 		return 1
 	}
 	return 0
+}
+
+// reportStats summarises what report printed and did.
+type reportStats struct {
+	redundant   int   // files beyond the first one of each group
+	reclaimable int64 // bytes taken up by the redundant files
+	deleted     int
+	freed       int64
+	failed      int // deletions that failed
+}
+
+// report prints the duplicate groups to w: a line per group followed by its
+// paths, one per indented line. With del set it also deletes every file of
+// each group except the first one, noting the outcome next to the path.
+func report(w io.Writer, groups []fileGroup, del bool) reportStats {
+	var rs reportStats
+	for _, g := range groups {
+		fmt.Fprintf(w, "%s: %s, %s each\n", g.hash[:10], plural(len(g.paths), "file"), formatBytes(g.size))
+		for i, path := range g.paths {
+			fmt.Fprintf(w, "\t%s", path)
+			if i > 0 {
+				rs.redundant++
+				rs.reclaimable += g.size
+				if del {
+					if err := deleteDuplicate(g.paths[0], path, g.size); err != nil {
+						rs.failed++
+						fmt.Fprintf(w, " ... NOT deleted: %v", err)
+					} else {
+						rs.deleted++
+						rs.freed += g.size
+						fmt.Fprint(w, " ... deleted")
+					}
+				}
+			}
+			fmt.Fprintln(w)
+		}
+	}
+	return rs
 }
 
 // deleteDuplicate removes dup, but only after checking that both it and
@@ -168,4 +208,26 @@ func version() string {
 		return info.Main.Version
 	}
 	return "unknown"
+}
+
+// plural renders a count with its noun: "1 file", "2 files".
+func plural(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// formatBytes renders a size in binary units: "512 B", "1.5 MiB".
+func formatBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }

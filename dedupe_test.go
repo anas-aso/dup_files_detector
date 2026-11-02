@@ -311,10 +311,28 @@ func TestRunReportsDuplicates(t *testing.T) {
 	if code := run([]string{"--directoryPath=" + dir}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Errorf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if want := ":\n\t" + a + "\n\t" + b + "\n"; !strings.Contains(stdout.String(), want) {
-		t.Errorf("stdout = %q, want it to contain %q", stdout.String(), want)
+	for _, want := range []string{
+		": 2 files, 3 B each\n\t" + a + "\n\t" + b + "\n",
+		"Found 1 group of duplicates: 1 redundant file, 3 B reclaimable.",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout = %q, want it to contain %q", stdout.String(), want)
+		}
 	}
 	assertExists(t, a, b)
+}
+
+func TestRunWithoutDuplicates(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a"), []byte("one"))
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--directoryPath", dir}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Errorf("exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != "No duplicates found.\n" {
+		t.Errorf("stdout = %q", stdout.String())
+	}
 }
 
 func TestRunDeletesDuplicatesWhenConfirmed(t *testing.T) {
@@ -331,8 +349,10 @@ func TestRunDeletesDuplicatesWhenConfirmed(t *testing.T) {
 	}
 	assertGone(t, b)
 	assertExists(t, a, c)
-	if want := "\t" + b + " ... deleted\n"; !strings.Contains(stdout.String(), want) {
-		t.Errorf("stdout = %q, want it to contain %q", stdout.String(), want)
+	for _, want := range []string{"\t" + b + " ... deleted\n", "Deleted 1 file, freed 3 B."} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout = %q, want it to contain %q", stdout.String(), want)
+		}
 	}
 }
 
@@ -347,6 +367,9 @@ func TestRunDeletesNothingWithoutConfirmation(t *testing.T) {
 		code := run([]string{"--directoryPath=" + dir, "--deleteDuplicates"}, strings.NewReader(answer), &stdout, &stderr)
 		if code != 1 {
 			t.Errorf("answer %q: exit code = %d, want 1", answer, code)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("answer %q: stdout = %q, want nothing", answer, stdout.String())
 		}
 		assertExists(t, a, b)
 	}
@@ -434,6 +457,17 @@ func TestConfirm(t *testing.T) {
 	} {
 		if got := confirm(strings.NewReader(input)); got != want {
 			t.Errorf("confirm(%q) = %v, want %v", input, got, want)
+		}
+	}
+}
+
+func TestFormatBytes(t *testing.T) {
+	for n, want := range map[int64]string{
+		0: "0 B", 1023: "1023 B", 1024: "1.0 KiB", 1536: "1.5 KiB",
+		3 << 20: "3.0 MiB", 5 << 30: "5.0 GiB", 2 << 40: "2.0 TiB",
+	} {
+		if got := formatBytes(n); got != want {
+			t.Errorf("formatBytes(%d) = %q, want %q", n, got, want)
 		}
 	}
 }
