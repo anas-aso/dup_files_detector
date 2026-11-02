@@ -16,6 +16,9 @@ package main
 
 import (
 	"cmp"
+	"errors"
+	"fmt"
+	"io"
 	"io/fs"
 	"path/filepath"
 	"slices"
@@ -30,33 +33,51 @@ type fileGroup struct {
 	paths []string
 }
 
+// scanStats summarises a scan.
+type scanStats struct {
+	files  int // regular files recorded
+	errors int // entries that could not be read and were skipped
+}
+
 // scan walks dirs and returns the groups of regular files that share a size,
 // which are the only candidates for being duplicates. Directories are walked
 // in the order given, each in lexical order. Symbolic links are not followed.
-// Groups are returned sorted by size, largest first, then by first path.
-func scan(dirs []string, ignoreEmpty bool) ([]fileGroup, error) {
+// Entries that cannot be read are reported on warnings and skipped. Groups
+// are returned sorted by size, largest first, then by first path.
+func scan(dirs []string, ignoreEmpty bool, warnings io.Writer) ([]fileGroup, scanStats, error) {
+	var stats scanStats
 	bySize := make(map[int64][]string)
+	skip := func(path string, err error) {
+		stats.errors++
+		fmt.Fprintf(warnings, "warning: skipping %s: %s\n", path, errText(err))
+	}
+
 	for _, dir := range dirs {
 		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
-				return err
+				// Usually a directory we may not read: report it and carry on
+				// with the rest of the tree.
+				skip(path, err)
+				return nil
 			}
 			if !d.Type().IsRegular() {
 				return nil // directories, symlinks, devices, ...
 			}
 			info, err := d.Info()
 			if err != nil {
-				return err
+				skip(path, err)
+				return nil
 			}
 			size := info.Size()
 			if ignoreEmpty && size == 0 {
 				return nil
 			}
+			stats.files++
 			bySize[size] = append(bySize[size], path)
 			return nil
 		})
 		if err != nil {
-			return nil, err
+			return nil, stats, err
 		}
 	}
 
@@ -67,7 +88,7 @@ func scan(dirs []string, ignoreEmpty bool) ([]fileGroup, error) {
 		}
 	}
 	sortGroups(groups)
-	return groups, nil
+	return groups, stats, nil
 }
 
 // sortGroups orders groups by size, largest first, then by first path, so
@@ -79,4 +100,14 @@ func sortGroups(groups []fileGroup) {
 		}
 		return cmp.Compare(a.paths[0], b.paths[0])
 	})
+}
+
+// errText describes err without the path of a *fs.PathError, which callers
+// print themselves.
+func errText(err error) string {
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		return pathErr.Err.Error()
+	}
+	return err.Error()
 }

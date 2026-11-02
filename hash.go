@@ -17,6 +17,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 )
@@ -39,16 +40,20 @@ func hashFile(path string) (string, error) {
 // findDuplicates narrows groups of same-size files down to groups of files
 // with identical content by splitting each group by the hash of its members.
 // Groups left with a single member are dropped; the order of the groups and
-// of the members of a group is preserved.
-func findDuplicates(groups []fileGroup) ([]fileGroup, error) {
+// of the members of a group is preserved. A file that cannot be read is
+// reported on warnings and dropped; the number of such files is returned.
+func findDuplicates(groups []fileGroup, warnings io.Writer) ([]fileGroup, int) {
 	var out []fileGroup
+	errs := 0
 	for _, g := range groups {
 		var subgroups []fileGroup
 		byHash := make(map[string]int) // hash -> index in subgroups
 		for _, path := range g.paths {
 			hash, err := hashFile(path)
 			if err != nil {
-				return nil, err
+				errs++
+				fmt.Fprintf(warnings, "warning: skipping %s: %s\n", path, errText(err))
+				continue
 			}
 			i, ok := byHash[hash]
 			if !ok {
@@ -64,5 +69,5 @@ func findDuplicates(groups []fileGroup) ([]fileGroup, error) {
 			}
 		}
 	}
-	return out, nil
+	return out, errs
 }

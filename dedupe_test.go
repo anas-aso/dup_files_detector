@@ -16,8 +16,10 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -33,18 +35,15 @@ func writeFile(t *testing.T, path string, content []byte) {
 	}
 }
 
-// dupsIn scans dirs and returns the duplicate groups found.
-func dupsIn(t *testing.T, ignoreEmpty bool, dirs ...string) []fileGroup {
+// dupsIn scans dirs and returns the duplicate groups found and the number of
+// files that could not be hashed.
+func dupsIn(t *testing.T, ignoreEmpty bool, dirs ...string) ([]fileGroup, int) {
 	t.Helper()
-	groups, err := scan(dirs, ignoreEmpty)
+	groups, _, err := scan(dirs, ignoreEmpty, io.Discard)
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	dups, err := findDuplicates(groups)
-	if err != nil {
-		t.Fatalf("findDuplicates: %v", err)
-	}
-	return dups
+	return findDuplicates(groups, io.Discard)
 }
 
 func assertGroups(t *testing.T, got []fileGroup, want [][]string) {
@@ -74,6 +73,16 @@ func assertGone(t *testing.T, path string) {
 	}
 }
 
+func skipIfPermissionsAreNotEnforced(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("file permissions work differently on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root, permissions are not enforced")
+	}
+}
+
 func TestFindsFilesWithIdenticalContent(t *testing.T) {
 	dir := t.TempDir()
 	x := filepath.Join(dir, "a", "x.txt")
@@ -83,7 +92,10 @@ func TestFindsFilesWithIdenticalContent(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "b", "z.txt"), []byte("world"))  // same size, other content
 	writeFile(t, filepath.Join(dir, "c", "w.txt"), []byte("hello!")) // unique size
 
-	dups := dupsIn(t, false, dir)
+	dups, errs := dupsIn(t, false, dir)
+	if errs != 0 {
+		t.Errorf("errors = %d, want 0", errs)
+	}
 	assertGroups(t, dups, [][]string{{x, y}})
 	if len(dups) == 1 {
 		if dups[0].size != 5 {
@@ -101,8 +113,10 @@ func TestEmptyFiles(t *testing.T) {
 	writeFile(t, a, nil)
 	writeFile(t, b, nil)
 
-	assertGroups(t, dupsIn(t, false, dir), [][]string{{a, b}})
-	assertGroups(t, dupsIn(t, true, dir), nil)
+	dups, _ := dupsIn(t, false, dir)
+	assertGroups(t, dups, [][]string{{a, b}})
+	dups, _ = dupsIn(t, true, dir)
+	assertGroups(t, dups, nil)
 }
 
 func TestGroupsAreOrderedBySizeThenPath(t *testing.T) {
@@ -116,11 +130,63 @@ func TestGroupsAreOrderedBySizeThenPath(t *testing.T) {
 	}
 	p := func(name string) string { return filepath.Join(dir, name) }
 
-	assertGroups(t, dupsIn(t, false, dir), [][]string{
+	dups, _ := dupsIn(t, false, dir)
+	assertGroups(t, dups, [][]string{
 		{p("c/1"), p("c/2")}, // largest first
 		{p("a/1"), p("a/2")}, // then by first path
 		{p("b/1"), p("b/2")},
 	})
+}
+
+func TestUnreadableDirectoryIsSkipped(t *testing.T) {
+	skipIfPermissionsAreNotEnforced(t)
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+	writeFile(t, a, []byte("dup"))
+	writeFile(t, b, []byte("dup"))
+	locked := filepath.Join(dir, "locked")
+	writeFile(t, filepath.Join(locked, "c"), []byte("dup"))
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o755) })
+
+	var warnings bytes.Buffer
+	groups, stats, err := scan([]string{dir}, false, &warnings)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if stats.errors != 1 || stats.files != 2 {
+		t.Errorf("stats = %+v, want 1 error and 2 files", stats)
+	}
+	if !strings.Contains(warnings.String(), locked) {
+		t.Errorf("warnings = %q, want a mention of %s", warnings.String(), locked)
+	}
+	dups, _ := findDuplicates(groups, io.Discard)
+	assertGroups(t, dups, [][]string{{a, b}})
+}
+
+func TestUnreadableFileIsSkipped(t *testing.T) {
+	skipIfPermissionsAreNotEnforced(t)
+	dir := t.TempDir()
+	a, b, c := filepath.Join(dir, "a"), filepath.Join(dir, "b"), filepath.Join(dir, "c")
+	writeFile(t, a, []byte("dup"))
+	writeFile(t, b, []byte("dup"))
+	writeFile(t, c, []byte("dup"))
+	if err := os.Chmod(c, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	groups, _, err := scan([]string{dir}, false, io.Discard)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	var warnings bytes.Buffer
+	dups, errs := findDuplicates(groups, &warnings)
+	if errs != 1 || !strings.Contains(warnings.String(), c) {
+		t.Errorf("errors = %d, warnings = %q; want 1 error mentioning %s", errs, warnings.String(), c)
+	}
+	assertGroups(t, dups, [][]string{{a, b}})
 }
 
 func TestRunReportsDuplicates(t *testing.T) {
@@ -169,6 +235,31 @@ func TestRunDeletesNothingWithoutConfirmation(t *testing.T) {
 			t.Errorf("answer %q: exit code = %d, want 1", answer, code)
 		}
 		assertExists(t, a, b)
+	}
+}
+
+func TestRunReportsProblemsInExitCode(t *testing.T) {
+	skipIfPermissionsAreNotEnforced(t)
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+	writeFile(t, a, []byte("dup"))
+	writeFile(t, b, []byte("dup"))
+	locked := filepath.Join(dir, "locked")
+	writeFile(t, filepath.Join(locked, "c"), []byte("dup"))
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o755) })
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--directoryPath=" + dir}, strings.NewReader(""), &stdout, &stderr); code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stdout.String(), "\t"+a+"\n\t"+b+"\n") {
+		t.Errorf("stdout = %q, want the duplicates that could be read", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "warning: skipping "+locked) {
+		t.Errorf("stderr = %q, want a warning about %s", stderr.String(), locked)
 	}
 }
 

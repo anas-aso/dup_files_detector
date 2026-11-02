@@ -38,7 +38,8 @@ func (l *stringList) String() string     { return strings.Join(*l, ", ") }
 func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
 
 // run is the whole program. It returns the exit code: 0 on success, 1 when
-// the user declines to continue or the scan fails, 2 on a usage error.
+// the user declines to continue, the scan fails or something had to be
+// skipped (the results may be incomplete), 2 on a usage error.
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("dup_files_detector", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -82,16 +83,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	fmt.Fprintf(stdout, "Processing files in the following directory(ies): %v\n", []string(dirs))
 
-	groups, err := scan(dirs, *ignoreEmpty)
+	groups, stats, err := scan(dirs, *ignoreEmpty, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return 1
 	}
-	dups, err := findDuplicates(groups)
-	if err != nil {
-		fmt.Fprintln(stderr, "error:", err)
-		return 1
-	}
+	dups, hashErrors := findDuplicates(groups, stderr)
 
 	for _, g := range dups {
 		fmt.Fprintf(stdout, "%s:\n", g.hash[:10])
@@ -105,6 +102,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			}
 			fmt.Fprintln(stdout)
 		}
+	}
+
+	if problems := stats.errors + hashErrors; problems > 0 {
+		fmt.Fprintf(stderr, "%d problem(s) reported above; the results may be incomplete.\n", problems)
+		return 1
 	}
 	return 0
 }
